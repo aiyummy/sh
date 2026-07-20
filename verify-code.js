@@ -3,7 +3,7 @@ export const meta = {
   description:
     'Canonical adversarial-verify scaffold for CODE review. Config-over-engine: the per-run specifics (scope, lenses, skeptics) are a small config you set via args; the hardened ENGINE below (refute-each -> per-finding map-reduce adjudicate -> graceful-degradation return, with bounded inputs + dedup + lens-failure visibility + a completeness critic) is fixed and do-not-edit. Start HERE for any code verify; verify-branch is a whole-branch preset of this.',
   whenToUse:
-    'Any post-implementation code adversarial-verify (a diff, a set of files/dirs on main, or a free-form subsystem audit). Pass args.repoRoot + args.scope + args.context; override args.lenses / args.skeptics for the run. args.currency: true adds the opt-in WEB-RESEARCH lens (checks pinned deps / provider APIs / SDK calls against current advisories + changelogs, dated sources required) — SET IT whenever the scope touches external services, SDKs, or pinned dependencies; leave off for routine internal diffs. For a whole branch, run verify-branch (it presets this). For DESIGN DOCS pre-implementation, use verify-design-doc instead (gap-hunt, different shape). LAUNCH PROTOCOL (2026-07-01): also set args.model — recommended \'opus\'; stages are PINNED by default (engine never inherits the session model), so this is optional; the DOUBLE-UNLOCK args.ceiling:\'fable\' AND args.fableApproved:true is required for fable (ask Max at the time), and args.ceiling:\'sonnet\' is a hard cheap cap. Per-stage map supported ({review, verify, adjudicate, synthesis}); the skeptic \'verify\' stage is the highest-volume — downgrade it first (e.g. {verify: "sonnet"}). Effort defaults are pre-tuned; override only with a reason. args.compact: true = telegraphic inter-agent findings prose (experimental; default off pending A/B).',
+    'Any post-implementation code adversarial-verify (a diff, a set of files/dirs on main, or a free-form subsystem audit). Pass args.repoRoot + args.scope + args.context; override args.lenses / args.skeptics for the run (skeptics = the ESCALATION panel size: the engine runs 1 skeptic per finding and escalates to the panel only on blockers and refuted majors — 2026-07-19 economization; args.skeptics: 1 forces flat-one). args.currency: true adds the opt-in WEB-RESEARCH lens (checks pinned deps / provider APIs / SDK calls against current advisories + changelogs, dated sources required) — SET IT whenever the scope touches external services, SDKs, or pinned dependencies; leave off for routine internal diffs. For a whole branch, run verify-branch (it presets this). For DESIGN DOCS pre-implementation, use verify-design-doc instead (gap-hunt, different shape). LAUNCH PROTOCOL (2026-07-01): also set args.model — recommended \'opus\'; stages are PINNED by default (engine never inherits the session model), so this is optional; the DOUBLE-UNLOCK args.ceiling:\'fable\' AND args.fableApproved:true is required for fable (ask Max at the time), and args.ceiling:\'sonnet\' is a hard cheap cap. Per-stage map supported ({review, verify, adjudicate, synthesis}); the skeptic \'verify\' stage is the highest-volume — downgrade it first (e.g. {verify: "sonnet"}). Effort defaults are pre-tuned; override only with a reason. args.compact: true = telegraphic inter-agent findings prose (experimental; default off pending A/B).',
   phases: [
     { title: 'Review', detail: 'parallel lenses over the scope -> candidate findings' },
     { title: 'Verify', detail: 'diverse skeptics try to REFUTE each finding' },
@@ -268,7 +268,7 @@ if (bad.length) throw new Error(
   `verify-code preflight: ${bad.map((p) => `${p.stage}->${p.model}`).join(', ')} — model must be haiku|sonnet|opus, or 'fable' WITH the double-unlock (args.ceiling:'fable' AND args.fableApproved:true). No tokens spent.`)
 const clamps = plan.filter((p) => p.raw !== p.model)
 if (clamps.length) log(`verify-code: ceiling '${ceilName}' clamped ${clamps.map((p) => `${p.stage} ${p.raw}->${p.model}`).join(', ')}.`)
-log(`verify-code: ${lenses.length} lenses, ${skeptics} skeptics/finding; ceiling=${ceilName}${FABLE_UNLOCKED ? ' [FABLE UNLOCKED]' : ''}; plan ${plan.map((p) => `${p.stage}=${p.model}/${p.effort}`).join(' ')}${compact ? '; compact prose' : ''}.`)
+log(`verify-code: ${lenses.length} lenses, adaptive skeptics (1/finding, ${skeptics}-vote panel on blockers + refuted majors); ceiling=${ceilName}${FABLE_UNLOCKED ? ' [FABLE UNLOCKED]' : ''}; plan ${plan.map((p) => `${p.stage}=${p.model}/${p.effort}`).join(' ')}${compact ? '; compact prose' : ''}.`)
 // LENS-FAILURE VISIBILITY (2026-07-01): agent() resolves to NULL — it does not throw —
 // when a subagent dies on a terminal API error or is skipped, so the old
 // `(r && r.findings) || []` mapping silently converted a dead lens into "zero
@@ -397,32 +397,45 @@ const SKEPTIC_LENSES = [
 ]
 const verifiable = clustered.filter((f) => f.severity !== 'nit')
 const nits = clustered.filter((f) => f.severity === 'nit')
-// Severity-scaled skeptics (2026-07-01, Max): blocker/major get the full panel; a
-// minor gets ONE (rigor belongs where incidents live — a minor doesn't warrant triple
-// refutation; nits already skip verification). Never below 1.
-const skepticsFor = (sev) => (sev === 'minor' ? 1 : skeptics)
+// Adaptive skeptic panel (2026-07-19, Max — supersedes the 2026-07-01 flat
+// severity scaling): verify cost is INPUT-dominated and the skeptic stage is
+// the run's volume driver, so the default is ONE skeptic per finding. The full
+// panel (args.skeptics, default 3) runs only where a single wrong vote is
+// expensive: every BLOCKER, and any MAJOR the lone skeptic REFUTES (a solo
+// refutation must never kill a real major without second opinions — the
+// escalation votes break the tie). Minors keep one; nits still skip entirely.
+const PANEL = Math.max(1, skeptics)
+const runSkeptic = (f, i) =>
+  spawn(
+    `${SHARED}\n\nYou are SKEPTIC #${i + 1} testing ONE finding — try to REFUTE it. ${SKEPTIC_LENSES[i % SKEPTIC_LENSES.length]}\n\nIf the finding's evidence cites a DATED EXTERNAL SOURCE (advisory/changelog/release notes), refute the CODE-side premise from the code (the pinned version, the call as written); to dispute the external claim itself, check it via web tools (ToolSearch: WebFetch/WebSearch) — never refute a sourced external fact from memory alone.\n\nFINDING:\n${JSON.stringify(
+      { title: f.title, severity: f.severity, file: f.file, location: f.location, claim: f.claim, evidence: (f.evidence || '').slice(0, 700), ...(f.corroboration && f.corroboration.count > 1 ? { corroborating_lenses: f.corroboration.lenses } : {}) }, null, 2,
+    )}`,
+    { label: 'verify', phase: 'Verify', schema: VERIFY_SCHEMA, effort: effortFor('verify', 'medium'), ...modelOptFor('verify') },
+  ).catch(() => null)
 
 const verified = await parallel(
-  verifiable.map((f) => () =>
-    parallel(
-      Array.from({ length: skepticsFor(f.severity) }, (_unused, i) => () =>
-        spawn(
-          `${SHARED}\n\nYou are SKEPTIC #${i + 1} testing ONE finding — try to REFUTE it. ${SKEPTIC_LENSES[i % SKEPTIC_LENSES.length]}\n\nIf the finding's evidence cites a DATED EXTERNAL SOURCE (advisory/changelog/release notes), refute the CODE-side premise from the code (the pinned version, the call as written); to dispute the external claim itself, check it via web tools (ToolSearch: WebFetch/WebSearch) — never refute a sourced external fact from memory alone.\n\nFINDING:\n${JSON.stringify(
-            { title: f.title, severity: f.severity, file: f.file, location: f.location, claim: f.claim, evidence: (f.evidence || '').slice(0, 700), ...(f.corroboration && f.corroboration.count > 1 ? { corroborating_lenses: f.corroboration.lenses } : {}) }, null, 2,
-          )}`,
-          { label: 'verify', phase: 'Verify', schema: VERIFY_SCHEMA, effort: effortFor('verify', 'medium'), ...modelOptFor('verify') },
-        ).catch(() => null)
-      ),
-    ).then((votes) => {
-      const v = votes.filter(Boolean)
-      const realCount = v.filter((x) => x.real).length
-      // Zero surviving votes means every skeptic call FAILED (infra), not that the
-      // finding was refuted — pass it through to adjudication (whose own catch
-      // degrades to a review-manually stub) instead of silently dropping it.
-      if (v.length === 0) log(`all skeptics failed for "${String(f.title).slice(0, 60)}" — passing to adjudication unrefuted`)
-      return { ...f, real_votes: realCount, total_votes: v.length, survives: realCount * 2 >= v.length }
-    }),
-  ),
+  verifiable.map((f) => async () => {
+    let votes
+    if (f.severity === 'blocker' && PANEL > 1) {
+      votes = await parallel(Array.from({ length: PANEL }, (_u, i) => () => runSkeptic(f, i)))
+    } else {
+      const first = await runSkeptic(f, 0)
+      if (f.severity === 'major' && PANEL > 1 && first !== null && first.real === false) {
+        log(`solo skeptic refuted major "${String(f.title).slice(0, 60)}" — escalating to a ${PANEL}-vote panel`)
+        const rest = await parallel(Array.from({ length: PANEL - 1 }, (_u, i) => () => runSkeptic(f, i + 1)))
+        votes = [first, ...rest]
+      } else {
+        votes = [first]
+      }
+    }
+    const v = votes.filter(Boolean)
+    const realCount = v.filter((x) => x.real).length
+    // Zero surviving votes means every skeptic call FAILED (infra), not that the
+    // finding was refuted — pass it through to adjudication (whose own catch
+    // degrades to a review-manually stub) instead of silently dropping it.
+    if (v.length === 0) log(`all skeptics failed for "${String(f.title).slice(0, 60)}" — passing to adjudication unrefuted`)
+    return { ...f, real_votes: realCount, total_votes: v.length, survives: realCount * 2 >= v.length }
+  }),
 )
 const survived = verified.filter((f) => f.survives)
 log(`${survived.length}/${verifiable.length} survived refutation; ${nits.length} nits.`)

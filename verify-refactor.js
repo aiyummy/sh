@@ -279,7 +279,7 @@ if (bad.length) throw new Error(
   `verify-refactor preflight: ${bad.map((p) => `${p.stage}->${p.model}`).join(', ')} — model must be haiku|sonnet|opus, or 'fable' WITH the double-unlock (args.ceiling:'fable' AND args.fableApproved:true). No tokens spent.`)
 const clamps = plan.filter((p) => p.raw !== p.model)
 if (clamps.length) log(`verify-refactor: ceiling '${ceilName}' clamped ${clamps.map((p) => `${p.stage} ${p.raw}->${p.model}`).join(', ')}.`)
-log(`verify-refactor: ${lenses.length} lenses, ${skeptics} skeptics/finding; ceiling=${ceilName}${FABLE_UNLOCKED ? ' [FABLE UNLOCKED]' : ''}; plan ${plan.map((p) => `${p.stage}=${p.model}/${p.effort}`).join(' ')}${compact ? '; compact prose' : ''}.`)
+log(`verify-refactor: ${lenses.length} lenses, adaptive skeptics (1/finding, ${skeptics}-vote panel on blockers + refuted majors); ceiling=${ceilName}${FABLE_UNLOCKED ? ' [FABLE UNLOCKED]' : ''}; plan ${plan.map((p) => `${p.stage}=${p.model}/${p.effort}`).join(' ')}${compact ? '; compact prose' : ''}.`)
 // LENS-FAILURE VISIBILITY (2026-07-01): agent() resolves to NULL — it does not throw —
 // when a subagent dies on a terminal API error or is skipped, so the old
 // `(r && r.findings) || []` mapping silently converted a dead lens into "zero
@@ -408,32 +408,44 @@ const SKEPTIC_LENSES = [
 ]
 const verifiable = clustered.filter((f) => f.severity !== 'nit')
 const nits = clustered.filter((f) => f.severity === 'nit')
-// Severity-scaled skeptics (2026-07-01, Max): blocker/major get the full panel; a
-// minor gets ONE (rigor belongs where the payoff is — a minor refactor doesn't
-// warrant triple cost/benefit debate; nits already skip verification). Never below 1.
-const skepticsFor = (sev) => (sev === 'minor' ? 1 : skeptics)
+// Adaptive skeptic panel (2026-07-19, Max — supersedes the 2026-07-01 flat
+// severity scaling; LOCKSTEP with verify-code): ONE skeptic per finding by
+// default; the full panel (args.skeptics, default 3) runs only on every
+// BLOCKER and on any MAJOR the lone skeptic REFUTES — a solo refutation
+// must never kill a high-value finding without second opinions. Minors keep
+// one; nits still skip entirely.
+const PANEL = Math.max(1, skeptics)
+const runSkeptic = (f, i) =>
+  spawn(
+    `${SHARED}\n\nYou are SKEPTIC #${i + 1} testing ONE finding — try to REFUTE it. ${SKEPTIC_LENSES[i % SKEPTIC_LENSES.length]}\n\nIf the finding's evidence cites a DATED EXTERNAL SOURCE (advisory/changelog/release notes), refute the CODE-side premise from the code (the pinned version, the call as written); to dispute the external claim itself, check it via web tools (ToolSearch: WebFetch/WebSearch) — never refute a sourced external fact from memory alone.\n\nFINDING:\n${JSON.stringify(
+      { title: f.title, severity: f.severity, file: f.file, location: f.location, claim: f.claim, evidence: (f.evidence || '').slice(0, 700), ...(f.corroboration && f.corroboration.count > 1 ? { corroborating_lenses: f.corroboration.lenses } : {}) }, null, 2,
+    )}`,
+    { label: 'verify', phase: 'Verify', schema: VERIFY_SCHEMA, effort: effortFor('verify', 'medium'), ...modelOptFor('verify') },
+  ).catch(() => null)
 
 const verified = await parallel(
-  verifiable.map((f) => () =>
-    parallel(
-      Array.from({ length: skepticsFor(f.severity) }, (_unused, i) => () =>
-        spawn(
-          `${SHARED}\n\nYou are SKEPTIC #${i + 1} testing ONE finding — try to REFUTE it. ${SKEPTIC_LENSES[i % SKEPTIC_LENSES.length]}\n\nIf the finding's evidence cites a DATED EXTERNAL SOURCE (advisory/changelog/release notes), refute the CODE-side premise from the code (the pinned version, the call as written); to dispute the external claim itself, check it via web tools (ToolSearch: WebFetch/WebSearch) — never refute a sourced external fact from memory alone.\n\nFINDING:\n${JSON.stringify(
-            { title: f.title, severity: f.severity, file: f.file, location: f.location, claim: f.claim, evidence: (f.evidence || '').slice(0, 700), ...(f.corroboration && f.corroboration.count > 1 ? { corroborating_lenses: f.corroboration.lenses } : {}) }, null, 2,
-          )}`,
-          { label: 'verify', phase: 'Verify', schema: VERIFY_SCHEMA, effort: effortFor('verify', 'medium'), ...modelOptFor('verify') },
-        ).catch(() => null)
-      ),
-    ).then((votes) => {
-      const v = votes.filter(Boolean)
-      const realCount = v.filter((x) => x.real).length
-      // Zero surviving votes means every skeptic call FAILED (infra), not that the
-      // finding was refuted — pass it through to adjudication (whose own catch
-      // degrades to a review-manually stub) instead of silently dropping it.
-      if (v.length === 0) log(`all skeptics failed for "${String(f.title).slice(0, 60)}" — passing to adjudication unrefuted`)
-      return { ...f, real_votes: realCount, total_votes: v.length, survives: realCount * 2 >= v.length }
-    }),
-  ),
+  verifiable.map((f) => async () => {
+    let votes
+    if (f.severity === 'blocker' && PANEL > 1) {
+      votes = await parallel(Array.from({ length: PANEL }, (_u, i) => () => runSkeptic(f, i)))
+    } else {
+      const first = await runSkeptic(f, 0)
+      if (f.severity === 'major' && PANEL > 1 && first !== null && first.real === false) {
+        log(`solo skeptic refuted major "${String(f.title).slice(0, 60)}" — escalating to a ${PANEL}-vote panel`)
+        const rest = await parallel(Array.from({ length: PANEL - 1 }, (_u, i) => () => runSkeptic(f, i + 1)))
+        votes = [first, ...rest]
+      } else {
+        votes = [first]
+      }
+    }
+    const v = votes.filter(Boolean)
+    const realCount = v.filter((x) => x.real).length
+    // Zero surviving votes means every skeptic call FAILED (infra), not that the
+    // finding was refuted — pass it through to adjudication (whose own catch
+    // degrades to a review-manually stub) instead of silently dropping it.
+    if (v.length === 0) log(`all skeptics failed for "${String(f.title).slice(0, 60)}" — passing to adjudication unrefuted`)
+    return { ...f, real_votes: realCount, total_votes: v.length, survives: realCount * 2 >= v.length }
+  }),
 )
 const survived = verified.filter((f) => f.survives)
 log(`${survived.length}/${verifiable.length} survived refutation; ${nits.length} nits.`)
