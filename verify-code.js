@@ -3,7 +3,7 @@ export const meta = {
   description:
     'Canonical adversarial-verify scaffold for CODE review. Config-over-engine: the per-run specifics (scope, lenses, skeptics) are a small config you set via args; the hardened ENGINE below (refute-each -> per-finding map-reduce adjudicate -> graceful-degradation return, with bounded inputs + dedup + lens-failure visibility + a completeness critic) is fixed and do-not-edit. Start HERE for any code verify; verify-branch is a whole-branch preset of this.',
   whenToUse:
-    'Any post-implementation code adversarial-verify (a diff, a set of files/dirs on main, or a free-form subsystem audit). Pass args.repoRoot + args.scope + args.context; override args.lenses / args.skeptics for the run. For a whole branch, run verify-branch (it presets this). For DESIGN DOCS pre-implementation, use verify-design-doc instead (gap-hunt, different shape). LAUNCH PROTOCOL (2026-07-01): also set args.model — recommended \'opus\'; stages are PINNED by default (engine never inherits the session model), so this is optional; the DOUBLE-UNLOCK args.ceiling:\'fable\' AND args.fableApproved:true is required for fable (ask Max at the time), and args.ceiling:\'sonnet\' is a hard cheap cap. Per-stage map supported ({review, verify, adjudicate, synthesis}); the skeptic \'verify\' stage is the highest-volume — downgrade it first (e.g. {verify: "sonnet"}). Effort defaults are pre-tuned; override only with a reason. args.compact: true = telegraphic inter-agent findings prose (experimental; default off pending A/B).',
+    'Any post-implementation code adversarial-verify (a diff, a set of files/dirs on main, or a free-form subsystem audit). Pass args.repoRoot + args.scope + args.context; override args.lenses / args.skeptics for the run. args.currency: true adds the opt-in WEB-RESEARCH lens (checks pinned deps / provider APIs / SDK calls against current advisories + changelogs, dated sources required) — SET IT whenever the scope touches external services, SDKs, or pinned dependencies; leave off for routine internal diffs. For a whole branch, run verify-branch (it presets this). For DESIGN DOCS pre-implementation, use verify-design-doc instead (gap-hunt, different shape). LAUNCH PROTOCOL (2026-07-01): also set args.model — recommended \'opus\'; stages are PINNED by default (engine never inherits the session model), so this is optional; the DOUBLE-UNLOCK args.ceiling:\'fable\' AND args.fableApproved:true is required for fable (ask Max at the time), and args.ceiling:\'sonnet\' is a hard cheap cap. Per-stage map supported ({review, verify, adjudicate, synthesis}); the skeptic \'verify\' stage is the highest-volume — downgrade it first (e.g. {verify: "sonnet"}). Effort defaults are pre-tuned; override only with a reason. args.compact: true = telegraphic inter-agent findings prose (experimental; default off pending A/B).',
   phases: [
     { title: 'Review', detail: 'parallel lenses over the scope -> candidate findings' },
     { title: 'Verify', detail: 'diverse skeptics try to REFUTE each finding' },
@@ -190,7 +190,17 @@ const DEFAULT_LENSES = [
   { key: 'security', focus: 'Injection (untrusted input reaching a prompt/SQL/shell/HTML without neutralization), broken authz, a read-only/no-write invariant violated, secrets in code/logs. Consider the realistic threat actor and whether the path is reachable.' },
   { key: 'test-coverage', focus: 'What is claimed working but untested or weakly tested? Map each behavior to the test that exercises its INVARIANT (not just its shape). Name the highest-value missing test. Do not pad with low-value suggestions.' },
 ]
-const lenses = Array.isArray(A.lenses) && A.lenses.length ? A.lenses : DEFAULT_LENSES
+// CURRENCY LENS (2026-07-19, Max) — OPT-IN web-research lens, activated by
+// args.currency: true. OFF by default: routine diffs don't pay web-research cost
+// (two-tier research doctrine, memory feedback_verify_current_docs); flip it on
+// when the scope touches external services, provider APIs/SDKs, or pinned
+// dependencies. Findings flow through the normal skeptic/adjudication pipeline.
+const CURRENCY_LENS = {
+  key: 'currency',
+  focus: 'CURRENCY / state of the art (the WEB-RESEARCH lens — active because args.currency was set). The code\'s dependencies and integrations — like your training data — have a cutoff; find where the world moved. If WebSearch/WebFetch are not already available, load them via ToolSearch first; if web access is GENUINELY unavailable, return ONE finding saying so (severity nit, title "[web-unavailable]") rather than faking coverage. Extract the 2-5 external-facing load-bearing facts from the scope: pinned dependency versions (read the lockfile/manifest — not the import), provider/SDK calls + payload field names, service limits/pricing the code assumes. Research those — typically 3-6 targeted searches: "<dep> security advisory <current year>", "<dep> <pinned major> breaking changes/deprecated", "<provider> API changelog <current year>". ALWAYS pin the current year into queries — undated queries return the training era. Report ONLY deltas that make the code wrong or risky AS WRITTEN (a CVE in the pinned range, a removed/deprecated endpoint, a renamed payload field, a changed limit); cite source + date inline in evidence; anything you cannot source gets tagged [training-data, unverified]. An empty findings array is the expected result when deps and APIs are current.',
+}
+const baseLenses = Array.isArray(A.lenses) && A.lenses.length ? A.lenses : DEFAULT_LENSES
+const lenses = A.currency === true ? [...baseLenses, CURRENCY_LENS] : baseLenses
 
 const SHARED = [
   'You are adversarially verifying CODE before it is trusted/merged. The test suite is presumed GREEN — find what a green suite + the author missed: correctness bugs, regressions in interacting code, broken invariants, security holes, unverified claims.',
@@ -381,7 +391,7 @@ const verified = await parallel(
     parallel(
       Array.from({ length: skepticsFor(f.severity) }, (_unused, i) => () =>
         spawn(
-          `${SHARED}\n\nYou are SKEPTIC #${i + 1} testing ONE finding — try to REFUTE it. ${SKEPTIC_LENSES[i % SKEPTIC_LENSES.length]}\n\nFINDING:\n${JSON.stringify(
+          `${SHARED}\n\nYou are SKEPTIC #${i + 1} testing ONE finding — try to REFUTE it. ${SKEPTIC_LENSES[i % SKEPTIC_LENSES.length]}\n\nIf the finding's evidence cites a DATED EXTERNAL SOURCE (advisory/changelog/release notes), refute the CODE-side premise from the code (the pinned version, the call as written); to dispute the external claim itself, check it via web tools (ToolSearch: WebFetch/WebSearch) — never refute a sourced external fact from memory alone.\n\nFINDING:\n${JSON.stringify(
             { title: f.title, severity: f.severity, file: f.file, location: f.location, claim: f.claim, evidence: (f.evidence || '').slice(0, 700), ...(f.corroboration && f.corroboration.count > 1 ? { corroborating_lenses: f.corroboration.lenses } : {}) }, null, 2,
           )}`,
           { label: 'verify', phase: 'Verify', schema: VERIFY_SCHEMA, effort: effortFor('verify', 'medium'), ...modelOptFor('verify') },

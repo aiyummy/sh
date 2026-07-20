@@ -3,7 +3,7 @@ export const meta = {
   description:
     'Whole-branch adversarial-verify: a PRESET of verify-code tuned for reviewing an ENTIRE branch vs its base (pre-merge). It supplies a branch-diff scope + breadth lenses (cross-phase integration, consumer-audit of shifted invariants, regression, security, coverage) and delegates to verify-code so the hardened engine (refute -> map-reduce adjudicate -> graceful return) is shared, not duplicated.',
   whenToUse:
-    'Before merging a branch that accumulated several phases of work — when per-chunk verifies can\'t see cross-phase integration. Pass args.repoRoot, args.base (default "main"), args.context (what the branch did + invariants that must hold END-TO-END). For a single diff/file-set/subsystem use verify-code directly; for design docs use verify-design-doc. LAUNCH PROTOCOL (2026-07-01): by-NAME delegation to verify-code only resolves when the session is rooted INSIDE this repo — from any other session root (e.g. the GitHub parent dir) pass args.enginePath = absolute path to the sibling verify-code.js. Also set args.model (\'opus\' recommended; verify-code PINS models by default now, so this is optional; forward args.ceiling:\'fable\' + args.fableApproved:true to double-unlock a fable pass).',
+    'Before merging a branch that accumulated several phases of work — when per-chunk verifies can\'t see cross-phase integration. Pass args.repoRoot, args.base (default "main"), args.context (what the branch did + invariants that must hold END-TO-END). args.currency: true forwards the opt-in web-research lens to verify-code — set it when the branch touches external services, SDKs, or pinned dependencies. For a single diff/file-set/subsystem use verify-code directly; for design docs use verify-design-doc. LAUNCH PROTOCOL (2026-07-01): by-NAME delegation to verify-code only resolves when the session is rooted INSIDE this repo — from any other session root (e.g. the GitHub parent dir) pass args.enginePath = absolute path to the sibling verify-code.js. Also set args.model (\'opus\' recommended; verify-code PINS models by default now, so this is optional; forward args.ceiling:\'fable\' + args.fableApproved:true to double-unlock a fable pass).',
   // No phases here: the work + phases belong to verify-code, which this delegates to.
 }
 
@@ -85,4 +85,7 @@ return await workflow(engineRef, {
   // double-unlock fable exactly as a direct verify-code run would (2026-07-03).
   ...(A.ceiling !== undefined ? { ceiling: A.ceiling } : {}),
   ...(A.fableApproved !== undefined ? { fableApproved: A.fableApproved } : {}),
+  // Forward the opt-in currency (web-research) lens flag (2026-07-19) — verify-code
+  // appends its CURRENCY_LENS to whatever lens set resolved (BRANCH_LENSES here).
+  ...(A.currency === true ? { currency: true } : {}),
 })
