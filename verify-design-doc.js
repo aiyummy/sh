@@ -132,31 +132,40 @@ function spawn(prompt, opts = {}) {
 }
 const docList = docs.map((d, i) => `  ${i + 1}. ${d}`).join('\n')
 
+// BOUNDED OUTPUT (2026-07-19, wf_97a44827 incident): two lanes produced structured
+// outputs so large the tool input was TRUNCATED in transit — the findings array was
+// dropped, the schema validator rejected with "must have required property 'findings'",
+// and after several oversized retries the agents submitted a tiny placeholder stub
+// that VALIDATED — a silent coverage hole disguised as a clean lane. Hard per-field
+// maxLength + maxItems keep the payload under the transit limit, and the PREAMBLE now
+// tells agents a schema rejection means truncation -> resubmit SHORTER, never stub.
 const GAP_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['role', 'coverage_note', 'findings'],
   properties: {
-    role: { type: 'string' },
+    role: { type: 'string', maxLength: 120 },
     coverage_note: {
       type: 'string',
+      maxLength: 1500,
       description:
         'What you actually checked. If you found little/nothing in your lane, JUSTIFY that confidence here (what you ruled out and why) rather than padding findings. An all-clean result must earn it.',
     },
     findings: {
       type: 'array',
+      maxItems: 12,
       description:
-        'Gaps in YOUR lane. A gap is an absence, a hand-wave, a circular/unsound premise, an unrepresentable case, or an unspecified lifecycle/decision — NOT a false factual claim (that is the claim-grounding lane only; the currency lane\'s gaps are post-cutoff deltas — deprecations/supersessions/lessons — with dated sources).',
+        'Gaps in YOUR lane, ranked most-severe first (at most 12 — merge or drop minors past that). A gap is an absence, a hand-wave, a circular/unsound premise, an unrepresentable case, or an unspecified lifecycle/decision — NOT a false factual claim (that is the claim-grounding lane only; the currency lane\'s gaps are post-cutoff deltas — deprecations/supersessions/lessons — with dated sources).',
       items: {
         type: 'object',
         additionalProperties: false,
         required: ['gap', 'location', 'severity', 'why_it_matters', 'suggested_fix'],
         properties: {
-          gap: { type: 'string' },
-          location: { type: 'string', description: 'Section/quote in the doc, or "(absent)" for a missing thing.' },
+          gap: { type: 'string', maxLength: 800 },
+          location: { type: 'string', maxLength: 300, description: 'Section/quote in the doc, or "(absent)" for a missing thing.' },
           severity: { type: 'string', enum: ['blocking', 'significant', 'minor'] },
-          why_it_matters: { type: 'string' },
-          suggested_fix: { type: 'string' },
+          why_it_matters: { type: 'string', maxLength: 800 },
+          suggested_fix: { type: 'string', maxLength: 800 },
         },
       },
     },
@@ -171,6 +180,7 @@ Hard rules:
 - If the document is marked planned / proposed / not-yet-shipped, then "the code doesn't exist yet" is NOT a gap — a design record describes intent, not build status. Flag missing DESIGN (an undecided question, an unrepresentable case, an unsound premise), never missing IMPLEMENTATION.
 - Stay in YOUR lane (below); other roles cover the others.
 - OUTPUT FRAMING: write every gap as a design-improvement note for the author — what the design should specify and why. When a gap touches security, state it as the missing control the design should add ("the doc never says who validates untrusted field X; specify it"), in neutral engineering language. Keep facts exact; focus on what to specify, not on misuse scenarios.
+- OUTPUT BOUNDS (hard): at most 12 findings, ranked most-severe first; each text field caps at 800 characters (coverage_note 1500). An oversized structured output gets TRUNCATED in transit — the submission arrives without its findings array and is rejected as a schema mismatch. If your submission is rejected that way, your findings were LOST to truncation: resubmit the SAME substance SHORTER. NEVER submit placeholder/stub/test text to satisfy the schema — a fabricated success is worse than a reported failure.
 
 The problem this design addresses:
 ${problem}

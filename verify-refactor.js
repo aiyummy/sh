@@ -215,6 +215,8 @@ const SHARED = [
   '',
   'Return ONLY concrete, defensible findings with a real code location. An empty findings array is valid and expected for a clean target — do NOT invent issues; cosmetic churn wastes a verification slot.',
   '',
+  'OUTPUT BOUNDS (hard): at most 12 findings, ranked most-severe first; each text field caps at 800 characters. An oversized structured output gets TRUNCATED in transit — the submission arrives without its findings array and is rejected as a schema mismatch. If your submission is rejected that way, your findings were LOST to truncation: resubmit the SAME substance SHORTER. NEVER submit placeholder/stub/test text to satisfy the schema — a fabricated success is worse than a reported failure.',
+  '',
   'OUTPUT FRAMING (all free-text fields): write findings as CODE-IMPROVEMENT notes for the maintainer — describe what the code currently does, why it is incorrect or unsafe, and the fix. Frame every finding as the missing or incorrect logic and its remedy (e.g. "this route omits the authorization check its siblings apply; add it"). State reachability as a plain code-path fact ("this branch runs when the session is absent"), not as instructions for misuse. Keep every technical fact exact — file, line, value, call flow. Neutral, remediation-focused engineering language throughout.',
   ...(compact ? [
     '',
@@ -227,22 +229,29 @@ const SHARED = [
 // above (or args) instead. Edits here change reliability for every consumer.
 // ===========================================================================
 
+// BOUNDED OUTPUT (2026-07-19, design-doc wf_97a44827 incident, lockstep-applied here):
+// an oversized structured output is TRUNCATED in transit, arrives without `findings`,
+// fails schema validation, and after repeated oversized retries the agent may submit
+// a tiny placeholder stub that VALIDATES — a silent coverage hole disguised as a clean
+// lens. Hard maxItems/maxLength keep payloads under the transit limit; SHARED carries
+// the matching resubmit-shorter/never-stub instruction.
 const FINDING_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['findings'],
   properties: {
     findings: {
       type: 'array',
+      maxItems: 12,
       items: {
         type: 'object', additionalProperties: false,
         required: ['title', 'severity', 'file', 'location', 'claim', 'evidence', 'suggested_fix'],
         properties: {
-          title: { type: 'string' },
+          title: { type: 'string', maxLength: 200 },
           severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'nit'] },
-          file: { type: 'string' },
-          location: { type: 'string' },
-          claim: { type: 'string' },
-          evidence: { type: 'string', description: 'concrete cross-file code reasoning, not speculation' },
-          suggested_fix: { type: 'string' },
+          file: { type: 'string', maxLength: 300 },
+          location: { type: 'string', maxLength: 300 },
+          claim: { type: 'string', maxLength: 800 },
+          evidence: { type: 'string', maxLength: 800, description: 'concrete cross-file code reasoning, not speculation' },
+          suggested_fix: { type: 'string', maxLength: 800 },
         },
       },
     },
