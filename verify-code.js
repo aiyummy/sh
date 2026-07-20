@@ -278,10 +278,26 @@ log(`verify-code: ${lenses.length} lenses, ${skeptics} skeptics/finding; ceiling
 // failure, each failed lens retries once, and what still fails is surfaced in
 // `lens_failures`.
 const lensFailures = []
+// STUB DETECTOR (2026-07-19, wf_97a44827 incident, lockstep with verify-design-doc):
+// schema bounds stop transit truncation, but an agent can still SATISFY the schema
+// with placeholder text (observed there: claim "test", fix "fix it" — a validated
+// fabrication). An exact placeholder word in any field, OR a finding whose
+// substantive fields are ALL tiny, routes through the same retry->lens_failures
+// path as null output — fabricated success is structurally impossible.
+const STUB_RX = /^(?:test(?:\s?gap)?|probe|stub|placeholder|todo|tbd|n\/a|na|none|nil|x+|-+|\.+|because|fix(?:\s?it)?|why|claim|title|file line \d+)$/i
+const isStubField = (s) => STUB_RX.test(String(s || '').trim())
+const isTiny = (s) => String(s || '').trim().length < 12
+const stubbedLens = (r) =>
+  (r.findings || []).some(
+    (f) =>
+      [f.title, f.file, f.location, f.claim, f.evidence, f.suggested_fix].some(isStubField) ||
+      [f.claim, f.evidence, f.suggested_fix].every(isTiny),
+  )
 const runLens = (l, tag) =>
   spawn(`${SHARED}\n\nLENS [${l.key}]: ${l.focus}`, { label: `review:${l.key}${tag}`, phase: 'Review', schema: FINDING_SCHEMA, effort: effortFor('review', 'high'), ...modelOptFor('review') })
     .then((r) => {
       if (!r || !Array.isArray(r.findings)) throw new Error('lens agent returned null/malformed')
+      if (stubbedLens(r)) throw new Error('lens agent returned placeholder/stub output')
       return r.findings.map((f) => ({ ...f, lens: l.key }))
     })
 const reviews = await parallel(

@@ -3,9 +3,10 @@ export const meta = {
   description:
     'Adversarially gap-hunt a design doc (ADR/spec): find what it omits, hand-waves, or cannot represent — not just whether its stated claims are true. Includes the counter-lanes gap-hunting structurally lacks: simplicity (argues for LESS design), brownfield rollout (how it lands on the existing system), verifiability (mechanical enforcement vs rule-by-comment), ALTITUDE (fog/tunnel — is each section at the right specificity), and CURRENCY (web research against the post-cutoff state of the art, dated sources required). Role failures surface as role_failures — never silently dropped. The run ends with a pointer to the solo PROMOTION PROTOCOL (junior-to-senior rewrite by the orchestrator; in-file comment block).',
   whenToUse:
-    'After drafting or substantially editing a design doc (ADR/spec). Confirmatory claim-checking inherits the author blind spots; this hunts the gaps. Pass args.docs (paths), optional args.repoRoot, optional args.context. LAUNCH PROTOCOL (2026-07-01): set args.model — \'opus\' for routine docs; roles are PINNED by default (gap+critic=opus, currency=sonnet; the engine never inherits the session model) — an ADR-grade run now sets args.model/args.effort explicitly, or uses the double-unlock args.ceiling:\'fable\' + args.fableApproved:true for a fable pass. Per-stage map { gap, critic } and per-ROLE keys (e.g. { currency: \'opus\' }) supported — role key wins. AFTER the run: read the output-file .result in full, then promote SOLO per the in-file PROMOTION PROTOCOL (senior review -> promoted v2 -> delta -> open questions for Max).',
+    'After drafting or substantially editing a design doc (ADR/spec). Confirmatory claim-checking inherits the author blind spots; this hunts the gaps. Pass args.docs (paths), optional args.repoRoot, optional args.context. LAUNCH PROTOCOL (2026-07-01): set args.model — PREFER THE MAP FORM model:{gap:\'opus\'} for an ADR-grade run: a bare string \'opus\' also upgrades the CURRENCY lane off its deliberate cheap sonnet default (web-search breadth work; observed 2026-07-19 — both runs silently paid opus for query execution). Roles are PINNED by default (gap+critic=opus, cluster+currency=sonnet; the engine never inherits the session model); double-unlock args.ceiling:\'fable\' + args.fableApproved:true for a fable pass. Per-stage map { gap, cluster, critic } and per-ROLE keys (e.g. { currency: \'opus\' }) supported — role key wins. AFTER the run: read the output-file .result in full (summary + findings_by_severity lead it), then promote SOLO per the in-file PROMOTION PROTOCOL (senior review -> promoted v2 -> delta -> open questions for Max).',
   phases: [
     { title: 'Gap hunt', detail: 'parallel adversarial roles: structure, premises, worst-case, schema, lifecycle, absences, simplicity, rollout, verifiability, altitude, currency (web SOTA), claim-grounding' },
+    { title: 'Merge', detail: 'cluster duplicate findings across lanes; tag corroboration' },
     { title: 'Completeness critic', detail: 'what dimension did the roles themselves miss' },
   ],
 }
@@ -78,7 +79,7 @@ const ceilName = Object.keys(MODEL_TIER).find((k) => MODEL_TIER[k] === CEILING_T
 if (A && typeof A === 'object' && /fable/i.test(JSON.stringify(A)) && !FABLE_UNLOCKED)
   throw new Error("verify-design-doc: 'fable' requested in args without the double-unlock (set args.ceiling:'fable' AND args.fableApproved:true, only after Max approves at the time).")
 
-const MODEL_DEFAULTS = { gap: 'opus', critic: 'opus' }
+const MODEL_DEFAULTS = { gap: 'opus', critic: 'opus', cluster: 'sonnet' }
 // Clamp a resolved model DOWN to the ceiling — hard cheap cap when args.ceiling<opus.
 // 'fable'/unknown are NEVER silently clamped (guards make a fable request fail loudly).
 function capModel(m) {
@@ -111,7 +112,7 @@ function roleModelOpt(r) { return { model: roleModelFor(r) } }
 // { gap, critic }); thinking:false -> 'low', true FLOORS at 'high' (harmonized with the
 // code engines, 2026-07-03 — was a bare SET that could lower a max session). Never inherits.
 const EFFORT_TIERS = ['low', 'medium', 'high', 'xhigh', 'max']
-const EFFORT_DEFAULTS = { gap: 'high', critic: 'high' }
+const EFFORT_DEFAULTS = { gap: 'high', critic: 'high', cluster: 'medium' }
 function effortOptFor(stage) {
   let e = EFFORT_DEFAULTS[stage] || 'high'
   if (A && typeof A.effort === 'string' && EFFORT_TIERS.includes(A.effort)) e = A.effort
@@ -326,6 +327,7 @@ phase('Gap hunt')
 // resolved plan is now VISIBLE up front (a silent inherit was the 2026-07-01 footgun).
 const plan = [
   ...roles.map((r) => ({ stage: `gap:${r.key}`, raw: roleModelForRaw(r), model: roleModelFor(r) })),
+  { stage: 'cluster', raw: modelForRaw('cluster'), model: modelFor('cluster') },
   { stage: 'critic', raw: modelForRaw('critic'), model: modelFor('critic') },
 ]
 const KNOWN_MODELS = new Set(Object.keys(MODEL_TIER))
@@ -342,11 +344,28 @@ log(`verify-design-doc: ${roles.length} roles over ${docs.length} doc(s); ceilin
 // verify-refactor's duplication lens). Null/malformed is treated as failure, each
 // failed role retries once, and what still fails is surfaced in `role_failures` AND
 // shown to the completeness critic as an unexamined lane.
+// STUB DETECTOR (2026-07-19, wf_97a44827 incident): schema bounds stop transit
+// truncation, but an agent can still SATISFY the schema with placeholder text
+// (observed: gap "test", why "because", fix "fix it" — a validated fabrication).
+// An exact placeholder word in any field, OR a finding whose substantive fields
+// are ALL tiny, routes through the same retry->role_failures path as null
+// output — fabricated success is structurally impossible, not vigilance-dependent.
+const STUB_RX = /^(?:test(?:\s?gap)?|probe|stub|placeholder|todo|tbd|n\/a|na|none|nil|x+|-+|\.+|because|fix(?:\s?it)?|why|gap|loc(?:ation)?|file line \d+)$/i
+const isStubField = (s) => STUB_RX.test(String(s || '').trim())
+const isTiny = (s) => String(s || '').trim().length < 12
+const stubbed = (res) =>
+  isStubField(res.coverage_note) ||
+  (res.findings || []).some(
+    (f) =>
+      [f.gap, f.location, f.why_it_matters, f.suggested_fix].some(isStubField) ||
+      [f.gap, f.why_it_matters, f.suggested_fix].every(isTiny),
+  )
 const roleFailures = []
 const runRole = (r, tag) =>
   spawn(r.prompt, { label: `gap:${r.key}${tag}`, phase: 'Gap hunt', schema: GAP_SCHEMA, agentType: 'Explore', ...roleModelOpt(r), ...effortOptFor('gap') })
     .then((res) => {
       if (!res || !Array.isArray(res.findings)) throw new Error('role agent returned null/malformed')
+      if (stubbed(res)) throw new Error('role agent returned placeholder/stub output')
       return res
     })
 const gapResults = (
@@ -362,6 +381,64 @@ const gapResults = (
     ),
   )
 ).filter(Boolean)
+
+// MERGE (2026-07-19, Max): cluster duplicate findings ACROSS lanes and tag
+// corroboration instead of dropping — cross-lane agreement is confidence signal
+// (5 lanes independently flagging one gap = the strongest finding in the run),
+// and unmerged duplication doubles the solo promotion reading (observed: ~80
+// raw -> ~50 unique on the ADR-set run). Graceful: a cluster failure degrades
+// to unmerged findings with a log line, never throws away the gap hunt.
+phase('Merge')
+const flat = gapResults.flatMap((r) => r.findings.map((f) => ({ ...f, role: r.role })))
+const SEV_RANK = { blocking: 0, significant: 1, minor: 2 }
+let merged = flat.map((f) => ({ ...f, corroborating_roles: [f.role] }))
+if (flat.length > 1) {
+  const CLUSTER_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['clusters'],
+    properties: {
+      clusters: {
+        type: 'array',
+        maxItems: 100,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['member_indices'],
+          properties: {
+            member_indices: { type: 'array', maxItems: 20, items: { type: 'integer' }, description: 'indices (from the numbered list) of findings describing the SAME underlying design gap' },
+          },
+        },
+      },
+    },
+  }
+  const numbered = flat.map((f, i) => `${i}. [${f.severity}] (${String(f.role).slice(0, 60)}) ${String(f.gap).slice(0, 200)}`).join('\n')
+  const clusters = await spawn(
+    `You are deduplicating adversarial design-review findings from parallel review lanes. Below is a numbered list (index, severity, lane, summary). Group findings that describe the SAME underlying design gap (same missing decision/control/lifecycle, even if worded differently or anchored to different sections). Return clusters of member_indices — ONLY clusters with 2+ members (singletons are implied). Do not force-merge: distinct gaps in the same area stay separate.\n\n${numbered}`,
+    { label: 'cluster-merge', phase: 'Merge', schema: CLUSTER_SCHEMA, ...modelOptFor('cluster'), ...effortOptFor('cluster') },
+  )
+    .then((c) => (c && Array.isArray(c.clusters) ? c.clusters : null))
+    .catch(() => null)
+  if (clusters) {
+    const used = new Set()
+    const out = []
+    for (const cl of clusters) {
+      const idxs = (cl.member_indices || []).filter((i) => Number.isInteger(i) && i >= 0 && i < flat.length && !used.has(i))
+      if (idxs.length < 2) continue
+      idxs.forEach((i) => used.add(i))
+      const members = idxs.map((i) => flat[i])
+      const canon = members.reduce((a, b) => ((SEV_RANK[a.severity] ?? 3) <= (SEV_RANK[b.severity] ?? 3) ? a : b))
+      out.push({ ...canon, corroborating_roles: [...new Set(members.map((m) => m.role))] })
+    }
+    flat.forEach((f, i) => {
+      if (!used.has(i)) out.push({ ...f, corroborating_roles: [f.role] })
+    })
+    merged = out
+    log(`merge: ${flat.length} raw findings -> ${merged.length} unique (${merged.filter((m) => m.corroborating_roles.length > 1).length} corroborated by 2+ lanes)`)
+  } else {
+    log('cluster-merge failed — returning unmerged findings (corroboration tags absent)')
+  }
+}
 
 // Compact digest so the completeness critic can react to what already ran —
 // including which lanes FAILED (an unexamined lane is a coverage hole, not clean).
@@ -396,6 +473,7 @@ Do NOT repeat them. Any line marked ROLE FAILED is an unexamined lane — call i
     { label: 'gap:completeness-critic', phase: 'Completeness critic', schema: GAP_SCHEMA, agentType: 'Explore', ...modelOptFor('critic'), ...effortOptFor('critic') },
   ).then((c) => {
     if (!c || !Array.isArray(c.findings)) throw new Error('critic agent returned null/malformed')
+    if (stubbed(c)) throw new Error('critic agent returned placeholder/stub output')
     return c
   })
 const critic = await runCritic()
@@ -439,15 +517,32 @@ const critic = await runCritic()
 // the evidence and defer. Zero blocking/significant findings is a legitimate
 // outcome — say "this doc holds" and stop; do not manufacture findings.
 // ===========================================================================
-// Lead with the small completeness-critic digest; gapHunt (the full role
-// findings) can be large. The full object is persisted at the output-file under
-// `.result` — the task-notification inline preview is capped (~9KB) and may
-// truncate gapHunt, so read `.result` from the output-file before acting on the
-// gaps, never just the inline preview (see verify-code's CONSUMING THE RESULT
-// note + memory feedback_adversarial_verify_workflow_design).
+// SUMMARY-FIRST RETURN (2026-07-19, Max): the task-notification inline preview
+// caps at ~9KB, so lead with the tally + severity-sorted merged findings — the
+// preview becomes useful instead of truncating mid-critic-prose. The full
+// object is persisted at the output-file under `.result`; read THAT before
+// acting on the gaps (coverage notes live in gapHunt), never just the preview
+// (see memory feedback_workflow_result_consumption).
+const criticTagged = (critic.findings || []).map((f) => ({ ...f, role: 'completeness-critic', corroborating_roles: ['completeness-critic'] }))
+const findingsBySeverity = [...merged, ...criticTagged].sort(
+  (a, b) => (SEV_RANK[a.severity] ?? 3) - (SEV_RANK[b.severity] ?? 3) || b.corroborating_roles.length - a.corroborating_roles.length,
+)
+const counts = { blocking: 0, significant: 0, minor: 0 }
+findingsBySeverity.forEach((f) => {
+  if (counts[f.severity] != null) counts[f.severity]++
+})
 return {
+  summary: {
+    counts,
+    total_unique: findingsBySeverity.length,
+    raw_findings: flat.length + criticTagged.length,
+    corroborated_2plus: merged.filter((m) => m.corroborating_roles.length > 1).length,
+    roles_completed: gapResults.length,
+    role_failures: roleFailures,
+  },
+  findings_by_severity: findingsBySeverity,
   completenessCritic: critic,
   role_failures: roleFailures,
   gapHunt: gapResults,
-  promotion: 'CHECK done. Next: the ORCHESTRATOR promotes SOLO per the PROMOTION PROTOCOL comment block in verify-design-doc.js (altitude verdict -> senior review -> promoted v2 -> delta -> open questions for Max). Do not delegate the rewrite to an agent.',
+  promotion: 'CHECK done. Next: the ORCHESTRATOR promotes SOLO per the PROMOTION PROTOCOL comment block in verify-design-doc.js (altitude verdict -> senior review -> promoted v2 -> delta -> open questions for Max). Work from findings_by_severity (deduped, corroboration-tagged); coverage notes are in gapHunt. Do not delegate the rewrite to an agent.',
 }
